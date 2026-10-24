@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Live XY plot for an M1C1 LiDAR connected to Raspberry Pi UART.
 
-The LiDAR stream is binary, not line-oriented. This script only depends on the
-standalone M1C1 protocol parser in this project and keeps serial I/O off the
-Matplotlib event loop so the plot remains responsive.
+The LiDAR stream is binary, not line-oriented. The M1C1 parser and coordinate
+conversion are included below so this file can be copied to a Pi and run on its
+own. Serial I/O stays off the Matplotlib event loop so the plot remains
+responsive.
 
 Example:
     python3 tools/plot_lidar_uart.py --port /dev/serial0
@@ -13,21 +14,114 @@ from __future__ import annotations
 
 import argparse
 from collections import deque
-from pathlib import Path
+from dataclasses import dataclass
+import math
 import queue
-import sys
 import threading
 
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
-import numpy as np
 
 
-# Allow the script to run directly from a source checkout on the Pi.
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PROJECT_ROOT / "src"))
+# ---------------------------------------------------------------------------
+# M1C1 protocol (kept inside this file so the script runs by itself)
+# ---------------------------------------------------------------------------
 
-from lidar_localization.protocol import LidarFrame, M1C1Parser  # noqa: E402
+HEADER = b"\xAA\x55"
+MAX_SAMPLES = 60
+
+
+@dataclass(frozen=True)
+class LidarPoint:
+    angle_deg: float
+    distance_mm: int
+
+
+@dataclass(frozen=True)
+class LidarFrame:
+    frame_type: int
+    start_of_scan: bool
+    points: tuple[LidarPoint, ...]
+
+
+def u16(data: bytes, offset: int) -> int:
+    return data[offset] | (data[offset + 1] << 8)
+
+
+def packet_checksum(packet: bytes) -> int:
+    """Calculate the M1C1 pairwise XOR checksum, skipping bytes 8-9."""
+    c0 = c1 = 0
+    for offset in range(0, len(packet), 2):
+        if offset == 8:
+            continue
+        c0 ^= packet[offset]
+        c1 ^= packet[offset + 1]
+    return c0 | (c1 << 8)
+
+
+def decode_packet(packet: bytes) -> LidarFrame | None:
+    """Validate and decode one complete M1C1 packet."""
+    if len(packet) < 12 or packet[:2] != HEADER:
+        return None
+    count = packet[3]
+    if count < 1 or count > MAX_SAMPLES or len(packet) != 10 + count * 2:
+        return None
+    if packet_checksum(packet) != u16(packet, 8):
+        return None
+
+    start = (u16(packet, 4) >> 1) / 64.0
+    end = (u16(packet, 6) >> 1) / 64.0
+    span = (end - start) % 360.0
+    step = span / (count - 1) if count > 1 else 0.0
+    points = tuple(
+        LidarPoint(
+            angle_deg=(start + index * step) % 360.0,
+            distance_mm=u16(packet, 10 + index * 2) >> 2,
+        )
+        for index in range(count)
+    )
+    frame_type = packet[2]
+    return LidarFrame(frame_type, bool(frame_type & 0x01), points)
+
+
+class M1C1Parser:
+    """Recover complete, checksum-valid frames from arbitrary UART chunks."""
+
+    def __init__(self) -> None:
+        self.buffer = bytearray()
+        self.good_packets = 0
+        self.bad_packets = 0
+
+    def feed(self, data: bytes) -> list[LidarFrame]:
+        self.buffer.extend(data)
+        frames: list[LidarFrame] = []
+        while True:
+            start = self.buffer.find(HEADER)
+            if start < 0:
+                self.buffer[:] = HEADER[:1] if self.buffer[-1:] == HEADER[:1] else b""
+                break
+            if start:
+                del self.buffer[:start]
+            if len(self.buffer) < 4:
+                break
+            count = self.buffer[3]
+            if count < 1 or count > MAX_SAMPLES:
+                del self.buffer[0]
+                self.bad_packets += 1
+                continue
+            size = 10 + count * 2
+            if len(self.buffer) < size:
+                break
+            raw = bytes(self.buffer[:size])
+            frame = decode_packet(raw)
+            if frame is None:
+                del self.buffer[0]
+                self.bad_packets += 1
+                continue
+            del self.buffer[:size]
+            self.good_packets += 1
+            frames.append(frame)
+        return frames
 
 
 def parse_args() -> argparse.Namespace:
@@ -43,16 +137,20 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def frame_to_xy(frame: LidarFrame, minimum_mm: int, maximum_mm: int) -> np.ndarray:
-    """Convert one validated polar frame into an N x 2 XY array in millimetres."""
+def frame_to_xy(frame: LidarFrame, minimum_mm: int, maximum_mm: int) -> list[tuple[float, float]]:
+    """Convert one validated polar frame into XY millimetres."""
 
     points = [point for point in frame.points
               if minimum_mm <= point.distance_mm <= maximum_mm]
     if not points:
-        return np.empty((0, 2), dtype=np.float64)
-    angle = np.radians([point.angle_deg for point in points])
-    distance = np.asarray([point.distance_mm for point in points], dtype=np.float64)
-    return np.column_stack((distance * np.sin(angle), distance * np.cos(angle)))
+        return []
+    return [
+        (
+            point.distance_mm * math.sin(math.radians(point.angle_deg)),
+            point.distance_mm * math.cos(math.radians(point.angle_deg)),
+        )
+        for point in points
+    ]
 
 
 class UartReader(threading.Thread):
@@ -139,11 +237,9 @@ def main() -> int:
             # current scan until the next scan-start marker arrives.
             if latest.start_of_scan:
                 points.clear()
-            xy = frame_to_xy(latest, args.min_mm, args.max_mm)
-            points.extend(map(tuple, xy))
+            points.extend(frame_to_xy(latest, args.min_mm, args.max_mm))
             if points:
-                values = np.asarray(points, dtype=np.float64)
-                scatter.set_offsets(values)
+                scatter.set_offsets(list(points))
 
         status = None
         while True:
