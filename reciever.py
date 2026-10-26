@@ -2,44 +2,53 @@ import math
 import socket
 from gpiozero import AngularServo
 
-# Change these to match your arm. The last two segments stay in a straight line.
+# Change these to match your arm.
 FIRST_SEGMENT_CM = 10
 SECOND_SEGMENT_CM = 10
 THIRD_SEGMENT_CM = 10
 
 SHOULDER_PIN = 17
 ELBOW_PIN = 27
-GRIPPER_PITCH_PIN = 22
+WRIST_PIN = 22
+GRIPPER_PITCH_PIN = 23
 
 SHOULDER_OFFSET = 0
 ELBOW_OFFSET = 0
+WRIST_OFFSET = 0
 GRIPPER_PITCH_OFFSET = 0
 PITCH_STEP = 5
+THIRD_SEGMENT_ANGLE = 0
 
-# This is the starting position of the gripper, measured from the shoulder pivot.
+# Starting gripper position, measured from the shoulder pivot.
 x = 18
 z = 8
 gripper_pitch = 0
 
 shoulder = AngularServo(SHOULDER_PIN, min_angle=-90, max_angle=90)
 elbow = AngularServo(ELBOW_PIN, min_angle=-90, max_angle=90)
+wrist = AngularServo(WRIST_PIN, min_angle=-90, max_angle=90)
 gripper_pitch_servo = AngularServo(GRIPPER_PITCH_PIN, min_angle=-90, max_angle=90)
 
 def move_arm():
-    end_length = SECOND_SEGMENT_CM + THIRD_SEGMENT_CM
+    third_segment_angle = math.radians(THIRD_SEGMENT_ANGLE)
+    wrist_x = x - THIRD_SEGMENT_CM * math.cos(third_segment_angle)
+    wrist_z = z - THIRD_SEGMENT_CM * math.sin(third_segment_angle)
+
     elbow_angle = math.acos(
-        (x * x + z * z - FIRST_SEGMENT_CM * FIRST_SEGMENT_CM - end_length * end_length)
-        / (2 * FIRST_SEGMENT_CM * end_length)
+        (wrist_x * wrist_x + wrist_z * wrist_z - FIRST_SEGMENT_CM * FIRST_SEGMENT_CM - SECOND_SEGMENT_CM * SECOND_SEGMENT_CM)
+        / (2 * FIRST_SEGMENT_CM * SECOND_SEGMENT_CM)
     )
-    shoulder_angle = math.atan2(z, x) - math.atan2(
-        end_length * math.sin(elbow_angle),
-        FIRST_SEGMENT_CM + end_length * math.cos(elbow_angle)
+    shoulder_angle = math.atan2(wrist_z, wrist_x) - math.atan2(
+        SECOND_SEGMENT_CM * math.sin(elbow_angle),
+        FIRST_SEGMENT_CM + SECOND_SEGMENT_CM * math.cos(elbow_angle)
     )
+    wrist_angle = third_segment_angle - shoulder_angle - elbow_angle
 
     shoulder.angle = math.degrees(shoulder_angle) + SHOULDER_OFFSET
     elbow.angle = math.degrees(elbow_angle) + ELBOW_OFFSET
+    wrist.angle = math.degrees(wrist_angle) + WRIST_OFFSET
     gripper_pitch_servo.angle = (
-        gripper_pitch - math.degrees(shoulder_angle + elbow_angle) + GRIPPER_PITCH_OFFSET
+        gripper_pitch - math.degrees(shoulder_angle + elbow_angle + wrist_angle) + GRIPPER_PITCH_OFFSET
     )
 
 def forward():
@@ -78,7 +87,7 @@ def pitch_down():
     gripper_pitch -= PITCH_STEP
     move_arm()
 
-host = "192.168.1.136"
+host = "192.168.100.210"
 port = 5005
 server_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 server_socket.bind((host, port))
