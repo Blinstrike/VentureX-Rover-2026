@@ -1,0 +1,13 @@
+theta: LiDAR's horizontal rotation angle (0–360°).
+
+phi: Servo's vertical angle (for example, 0–180°).
+
+And the LiDAR gives you the distance r for every measurement.
+
+The resulting 3D coordinates are:
+
+x =r sin(θ)
+y =r cos(θ)cos(ϕ)
+z =r cos(θ)sin(ϕ)
+​
+ 
