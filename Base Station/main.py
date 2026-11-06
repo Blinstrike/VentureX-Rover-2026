@@ -4,6 +4,8 @@ import socket
 import struct
 import json
 import threading
+import subprocess
+import os
 import pygame
 import communication as comm # Conține send_msg și recv_msg bazate pe JSON și prefix de lungime
 import utils
@@ -43,6 +45,7 @@ sock = connect_to_rover()
 
 # Container mutabil pentru thread-ul de heartbeat
 sock_container = [sock]
+lidar_viewer_process = None
 
 def heartbeat_thread_func(container):
     """ Trimite un ping automat la fiecare secundă dacă conexiunea este activă """
@@ -102,6 +105,12 @@ while running:
                     print("[PC] Trimitere comandă pornire scanare LiDAR...")
                     scan_packet = {"type": "scan_lidar"}
                     comm.send_msg(sock_container[0], scan_packet)
+                    # Launch the remote point-cloud viewer once; it uses TCP port 5006.
+                    if lidar_viewer_process is None or lidar_viewer_process.poll() is not None:
+                        viewer_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lidar_viewer.py")
+                        lidar_viewer_process = subprocess.Popen(
+                            [sys.executable, viewer_path, "--remote", ROVER_IP]
+                        )
                 if event.button == 5:
                     if control_mode == "drive": control_mode = "arm"
                     else: control_mode = "drive"
